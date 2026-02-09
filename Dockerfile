@@ -26,4 +26,8 @@ RUN uv sync
 
 EXPOSE 7860
 
-CMD ["uv", "run", "acestep", "--server-name", "0.0.0.0", "--port", "7860"]
+VOLUME ["/app/checkpoints"]
+
+RUN chmod +x /app/docker-entrypoint.sh
+
+CMD ["/app/docker-entrypoint.sh"]
