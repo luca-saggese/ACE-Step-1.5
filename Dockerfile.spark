@@ -200,13 +200,14 @@ echo "======================================================"
 
 # Build --init_service flags when ACESTEP_INIT_SERVICE=true
 INIT_ARGS=""
-if[ "${ACESTEP_INIT_SERVICE:-true}" = "true" ]; then
+if [ "${ACESTEP_INIT_SERVICE:-true}" = "true" ]; then
     INIT_ARGS="--init_service true"
-    [ -n "${ACESTEP_CONFIG_PATH:-}" ]   && INIT_ARGS="${INIT_ARGS} --config_path ${ACESTEP_CONFIG_PATH}"[ -n "${ACESTEP_LM_MODEL_PATH:-}" ] && INIT_ARGS="${INIT_ARGS} --init_llm true --lm_model_path ${ACESTEP_LM_MODEL_PATH}"
+    [ -n "${ACESTEP_CONFIG_PATH:-}" ]   && INIT_ARGS="${INIT_ARGS} --config_path ${ACESTEP_CONFIG_PATH}"
+    [ -n "${ACESTEP_LM_MODEL_PATH:-}" ] && INIT_ARGS="${INIT_ARGS} --init_llm true --lm_model_path ${ACESTEP_LM_MODEL_PATH}"
     echo "Auto-init    : DiT=${ACESTEP_CONFIG_PATH:-auto}  LM=${ACESTEP_LM_MODEL_PATH:-none}"
 fi
 
-if[ "${ACESTEP_MODE}" = "api" ]; then
+if [ "${ACESTEP_MODE}" = "api" ]; then
     echo "Starting REST API server on 0.0.0.0:${ACESTEP_API_PORT:-8001} ..."
     exec python -m acestep.api_server \
         --host "${ACESTEP_API_HOST:-0.0.0.0}" \
