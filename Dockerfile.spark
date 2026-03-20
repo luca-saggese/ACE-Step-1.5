@@ -46,7 +46,7 @@
 # Utilizziamo il container ufficiale PyTorch di NVIDIA per ARM64. 
 # Questo include PyTorch 2.x, Triton, torchaudio, e torchvision 
 # pre-ottimizzati specificatamente per l'architettura Blackwell (sm_121) e CUDA 13.
-FROM nvcr.io/nvidia/pytorch:26.01-py3
+FROM dgx-spark-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
