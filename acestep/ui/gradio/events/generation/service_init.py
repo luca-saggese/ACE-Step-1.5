@@ -14,7 +14,35 @@ from acestep.gpu_config import (
     get_global_gpu_config, is_lm_model_size_allowed, find_best_lm_model_on_disk,
     get_gpu_config_for_tier, set_global_gpu_config, GPU_TIER_LABELS, GPU_TIER_CONFIGS,
 )
-from .model_config import _is_pure_base_model, get_model_type_ui_settings
+from .model_config import is_pure_base_model, is_sft_model, get_model_type_ui_settings
+
+
+def _select_quantization_value(
+    *,
+    quantization_enabled: bool,
+    device: str,
+) -> str | None:
+    """Return the DiT quantization mode selected for the current UI state."""
+    quant_value = "int8_weight_only" if quantization_enabled else None
+    if not quantization_enabled or device not in {"auto", "cuda"}:
+        return quant_value
+
+    try:
+        import torch
+    except ImportError:
+        return quant_value
+
+    try:
+        if torch.cuda.is_available():
+            major, _ = torch.cuda.get_device_capability(0)
+            if major < 7:
+                logger.info(
+                    "Pre-Ampere CUDA detected: using w8a8_dynamic quantization for stability"
+                )
+                return "w8a8_dynamic"
+    except Exception:
+        return quant_value
+    return quant_value
 
 
 def refresh_checkpoints(dit_handler):
@@ -38,7 +66,10 @@ def init_service_wrapper(
         current_batch_size: Current batch size value from UI to preserve
             after reinitialization (optional).
     """
-    quant_value = "int8_weight_only" if quantization else None
+    quant_value = _select_quantization_value(
+        quantization_enabled=quantization,
+        device=device,
+    )
 
     gpu_config = get_global_gpu_config()
 
@@ -53,14 +84,18 @@ def init_service_wrapper(
             quantization = False
             quant_value = None
 
-    if init_llm and not gpu_config.available_lm_models:
-        logger.warning(
-            f"⚠️ GPU tier {gpu_config.tier} ({gpu_config.gpu_memory_gb:.1f}GB) does not support LM on GPU. "
-            "Falling back to CPU for LM initialization."
-        )
-        llm_handler.device = "cpu"
-    else:
-        llm_handler.device = device
+    # Compute lm_device only when initializing the LLM to avoid overwriting a
+    # previously-resolved device (e.g. "cuda") with the raw UI value ("auto").
+    # "auto" is resolved to the concrete device inside llm_handler.initialize().
+    if init_llm:
+        if not gpu_config.available_lm_models:
+            logger.warning(
+                f"⚠️ GPU tier {gpu_config.tier} ({gpu_config.gpu_memory_gb:.1f}GB) does not support LM on GPU. "
+                "Falling back to CPU for LM initialization."
+            )
+            lm_device = "cpu"
+        else:
+            lm_device = device
 
     if init_llm and lm_model_path and gpu_config.available_lm_models:
         if not is_lm_model_size_allowed(lm_model_path, gpu_config.available_lm_models):
@@ -77,25 +112,30 @@ def init_service_wrapper(
             f"(VRAM too low for KV cache), falling back to {backend}"
         )
 
+    # Derive project_root from the checkpoint path (which is the checkpoints
+    # directory itself, e.g. "<project>/checkpoints").  Passing it directly as
+    # project_root would cause initialize_service to append "checkpoints" again,
+    # resulting in "<project>/checkpoints/checkpoints".
+    current_file = os.path.abspath(__file__)
+    # This file is in acestep/ui/gradio/events/generation/
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(current_file))))))
+
     status, enable = dit_handler.initialize_service(
-        checkpoint, config_path, device,
+        project_root, config_path, device,
         use_flash_attention=use_flash_attention, compile_model=compile_model,
         offload_to_cpu=offload_to_cpu, offload_dit_to_cpu=offload_dit_to_cpu,
         quantization=quant_value, use_mlx_dit=mlx_dit,
     )
 
     if init_llm:
-        current_file = os.path.abspath(__file__)
-        # This file is in acestep/ui/gradio/events/generation/
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.dirname(current_file))))))
         checkpoint_dir = os.path.join(project_root, "checkpoints")
 
         lm_status, lm_success = llm_handler.initialize(
             checkpoint_dir=checkpoint_dir,
             lm_model_path=lm_model_path,
             backend=backend,
-            device=llm_handler.device,
+            device=lm_device,
             offload_to_cpu=offload_to_cpu,
             dtype=None,
         )
@@ -109,9 +149,13 @@ def init_service_wrapper(
     accordion_state = gr.Accordion(open=not is_model_initialized)
 
     is_turbo = dit_handler.is_turbo_model()
-    is_pure_base = _is_pure_base_model((config_path or "").lower())
+    config_path_lower = (config_path or "").lower()
+    is_pure_base = is_pure_base_model(config_path_lower)
+    # Match interactive path — SFT models need 50-step default here too.
+    is_sft = is_sft_model(config_path_lower)
     model_type_settings = get_model_type_ui_settings(
         is_turbo, current_mode=current_mode, is_pure_base=is_pure_base,
+        is_sft=is_sft,
     )
 
     gpu_config = get_global_gpu_config()
