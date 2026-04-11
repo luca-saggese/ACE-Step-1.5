@@ -1,0 +1,1714 @@
+openapi: "3.0.3"
+
+info:
+  title: ACE-Step Suno-Compatible API
+  version: "1.5.0"
+  description: |
+    100% Suno-API-compatible REST interface powered by ACE-Step 1.5.
+
+    All music-generation endpoints are **asynchronous**: the initial POST returns a
+    `taskId` that you poll with the corresponding `record-info` GET until `status`
+    reaches `SUCCESS` or `FAILED`.
+
+    Output audio files are served under `/audio/<filename>` as static files.
+
+    ### Authentication
+    When the server is configured with `API_KEY`, every request **must** include:
+    ```
+    Authorization: Bearer <api_key>
+    ```
+    If `API_KEY` is unset, the header is optional and all requests are accepted.
+
+  contact:
+    name: ACE-Step Project
+    url: https://github.com/ace-step/ACE-Step-1.5
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://localhost:7080
+    description: Local development server
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security
+# ─────────────────────────────────────────────────────────────────────────────
+securitySchemes: {}
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API Key
+      description: >
+        Pass your API key as a Bearer token.
+        Leave header absent when the server has no API_KEY configured.
+
+  # ── Shared enums ────────────────────────────────────────────────────────────
+  schemas:
+
+    # ── Enums ─────────────────────────────────────────────────────────────────
+    ModelVersion:
+      type: string
+      description: Suno / ACE-Step model version selector.
+      enum: [V4, V4_5, V4_5PLUS, V4_5ALL, V5, V5_5]
+      example: V4_5PLUS
+
+    PersonaModel:
+      type: string
+      enum: [style_persona, voice_persona]
+      default: style_persona
+
+    VocalGender:
+      type: string
+      enum: [m, f]
+      description: Gender hint for AI vocals.
+
+    SeparationType:
+      type: string
+      enum: [separate_vocal, split_stem]
+      default: separate_vocal
+      description: |
+        - `separate_vocal`: isolate the main vocal track
+        - `split_stem`: split into multiple stems (drums, bass, melody, vocals)
+
+    SoundKey:
+      type: string
+      description: Musical key for generated sounds.
+      enum:
+        - Any
+        - Cm
+        - C#m
+        - Dm
+        - D#m
+        - Em
+        - Fm
+        - F#m
+        - Gm
+        - G#m
+        - Am
+        - A#m
+        - Bm
+        - C
+        - C#
+        - D
+        - D#
+        - E
+        - F
+        - F#
+        - G
+        - G#
+        - A
+        - A#
+        - B
+      default: Any
+
+    TaskStatus:
+      type: string
+      description: |
+        Lifecycle of an async task:
+        - `PENDING` – queued, not yet started
+        - `GENERATING` – actively processing
+        - `TEXT_SUCCESS` – LLM phase completed, DiT phase pending
+        - `FIRST_SUCCESS` – first audio sample ready (batch mode)
+        - `SUCCESS` – all outputs ready
+        - `FAILED` – terminal error
+        - `CREATE_TASK_FAILED` – task could not be enqueued
+      enum:
+        - PENDING
+        - GENERATING
+        - TEXT_SUCCESS
+        - FIRST_SUCCESS
+        - SUCCESS
+        - FAILED
+        - CREATE_TASK_FAILED
+
+    TaskType:
+      type: string
+      enum: [GENERATE, LYRICS, VOCAL_REMOVAL, WAV, MP4, COVER, SOUNDS]
+
+    # ── Common response envelope ───────────────────────────────────────────────
+    ApiResponse:
+      type: object
+      required: [code, msg, data]
+      properties:
+        code:
+          type: integer
+          description: HTTP-like status code (200 = success).
+          example: 200
+        msg:
+          type: string
+          example: success
+        data:
+          description: Payload; null on error.
+          nullable: true
+
+    ErrorResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            code:
+              example: 400
+            msg:
+              example: Bad Request
+            data:
+              nullable: true
+              example: null
+
+    TaskCreatedData:
+      type: object
+      required: [taskId]
+      properties:
+        taskId:
+          type: string
+          description: Opaque identifier – use it with `record-info` endpoints.
+          example: a3f1b24c8e0d4f7a9b2c1d0e5f6a7b8c
+
+    # ── Audio output entry (sunoData item) ────────────────────────────────────
+    SunoAudioEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique audio identifier (UUID hex).
+          example: d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9
+        audioUrl:
+          type: string
+          nullable: true
+          description: Relative URL to stream / download the audio file.
+          example: /audio/a3f1b24c_0.flac
+        streamAudioUrl:
+          type: string
+          nullable: true
+          example: /audio/a3f1b24c_0.flac
+        imageUrl:
+          type: string
+          nullable: true
+          description: Cover art URL (null unless cover was generated).
+        prompt:
+          type: string
+          description: Lyrics or caption embedded in the output.
+        modelName:
+          type: string
+          example: ACE-Step-v1.5
+        title:
+          type: string
+          example: Track 1
+        tags:
+          type: string
+          description: Style tags used for generation.
+        createTime:
+          type: string
+          description: UTC timestamp of generation.
+          example: "2026-04-11 12:00:00"
+        duration:
+          type: number
+          nullable: true
+          description: Duration of the audio in seconds.
+          example: 30.4
+
+    # ── Task status response ───────────────────────────────────────────────────
+    TaskDetailData:
+      type: object
+      required: [taskId, status, type]
+      properties:
+        taskId:
+          type: string
+        param:
+          type: string
+          description: JSON-serialised original request parameters.
+        response:
+          nullable: true
+          description: Generation result payload (sunoData array) once SUCCESS.
+          type: object
+          properties:
+            taskId:
+              type: string
+            sunoData:
+              type: array
+              items:
+                $ref: "#/components/schemas/SunoAudioEntry"
+        status:
+          $ref: "#/components/schemas/TaskStatus"
+        type:
+          $ref: "#/components/schemas/TaskType"
+        errorCode:
+          type: integer
+          nullable: true
+        errorMessage:
+          type: string
+          nullable: true
+
+    # ── Request bodies ─────────────────────────────────────────────────────────
+    GenerateMusicRequest:
+      type: object
+      required: [customMode, instrumental, model, callBackUrl]
+      properties:
+        customMode:
+          type: boolean
+          description: |
+            - `true`: user supplies `style` + optionally `prompt` (lyrics).
+            - `false`: AI generates both style and lyrics from `prompt`.
+        instrumental:
+          type: boolean
+          description: Generate an instrumental track (no vocals).
+        model:
+          $ref: "#/components/schemas/ModelVersion"
+        callBackUrl:
+          type: string
+          format: uri
+          description: Webhook URL – server POSTs the result here when finished.
+        prompt:
+          type: string
+          description: |
+            - `customMode=false`: music description / theme (required).
+            - `customMode=true, instrumental=false`: explicit lyrics (required).
+        style:
+          type: string
+          description: Music style tags, e.g. `"Pop, Uplifting, Piano"`. Required when `customMode=true`.
+        title:
+          type: string
+          description: Track title. Required when `customMode=true`.
+        personaId:
+          type: string
+          nullable: true
+        personaModel:
+          $ref: "#/components/schemas/PersonaModel"
+        negativeTags:
+          type: string
+          nullable: true
+          description: Style tags to avoid.
+        vocalGender:
+          $ref: "#/components/schemas/VocalGender"
+        styleWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        weirdnessConstraint:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        audioWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+
+    ExtendMusicRequest:
+      type: object
+      required: [defaultParamFlag, audioId, model, callBackUrl]
+      properties:
+        defaultParamFlag:
+          type: boolean
+          description: When `true`, `prompt`, `style`, `title`, and `continueAt` are required.
+        audioId:
+          type: string
+          description: ID of an already-generated track to extend.
+        model:
+          $ref: "#/components/schemas/ModelVersion"
+        callBackUrl:
+          type: string
+          format: uri
+        prompt:
+          type: string
+          nullable: true
+        style:
+          type: string
+          nullable: true
+        title:
+          type: string
+          nullable: true
+        continueAt:
+          type: number
+          minimum: 0.01
+          nullable: true
+          description: Time offset (seconds) from which to continue the track.
+        personaId:
+          type: string
+          nullable: true
+        personaModel:
+          $ref: "#/components/schemas/PersonaModel"
+        negativeTags:
+          type: string
+          nullable: true
+        vocalGender:
+          $ref: "#/components/schemas/VocalGender"
+        styleWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        weirdnessConstraint:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        audioWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+
+    UploadCoverRequest:
+      type: object
+      required: [uploadUrl, customMode, instrumental, model, callBackUrl]
+      properties:
+        uploadUrl:
+          type: string
+          format: uri
+          description: URL of the reference audio file for the cover.
+        customMode:
+          type: boolean
+        instrumental:
+          type: boolean
+        model:
+          $ref: "#/components/schemas/ModelVersion"
+        callBackUrl:
+          type: string
+          format: uri
+        prompt:
+          type: string
+          nullable: true
+        style:
+          type: string
+          nullable: true
+        title:
+          type: string
+          nullable: true
+        personaId:
+          type: string
+          nullable: true
+        personaModel:
+          $ref: "#/components/schemas/PersonaModel"
+        negativeTags:
+          type: string
+          nullable: true
+        vocalGender:
+          $ref: "#/components/schemas/VocalGender"
+        styleWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        weirdnessConstraint:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        audioWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+
+    UploadExtendRequest:
+      type: object
+      required: [uploadUrl, defaultParamFlag, model, callBackUrl]
+      properties:
+        uploadUrl:
+          type: string
+          format: uri
+          description: URL of the audio file to extend.
+        defaultParamFlag:
+          type: boolean
+        model:
+          $ref: "#/components/schemas/ModelVersion"
+        callBackUrl:
+          type: string
+          format: uri
+        instrumental:
+          type: boolean
+          nullable: true
+        prompt:
+          type: string
+          nullable: true
+        style:
+          type: string
+          nullable: true
+        title:
+          type: string
+          nullable: true
+        continueAt:
+          type: number
+          minimum: 0.01
+          nullable: true
+        personaId:
+          type: string
+          nullable: true
+        personaModel:
+          $ref: "#/components/schemas/PersonaModel"
+        negativeTags:
+          type: string
+          nullable: true
+        vocalGender:
+          $ref: "#/components/schemas/VocalGender"
+        styleWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        weirdnessConstraint:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        audioWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+
+    GenerateMashupRequest:
+      type: object
+      required: [uploadUrlList, customMode, model, callBackUrl]
+      properties:
+        uploadUrlList:
+          type: array
+          items:
+            type: string
+            format: uri
+          minItems: 2
+          maxItems: 2
+          description: Exactly two audio URLs to blend into a mashup.
+        customMode:
+          type: boolean
+        model:
+          $ref: "#/components/schemas/ModelVersion"
+        callBackUrl:
+          type: string
+          format: uri
+        prompt:
+          type: string
+          nullable: true
+        style:
+          type: string
+          nullable: true
+        title:
+          type: string
+          nullable: true
+        instrumental:
+          type: boolean
+          nullable: true
+        vocalGender:
+          $ref: "#/components/schemas/VocalGender"
+        styleWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        weirdnessConstraint:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        audioWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+
+    AddVocalsRequest:
+      type: object
+      required: [prompt, title, negativeTags, style, uploadUrl, callBackUrl]
+      properties:
+        prompt:
+          type: string
+          description: Lyrics for the generated vocal track.
+        title:
+          type: string
+        negativeTags:
+          type: string
+        style:
+          type: string
+        uploadUrl:
+          type: string
+          format: uri
+          description: URL of the instrumental track to add vocals to.
+        callBackUrl:
+          type: string
+          format: uri
+        vocalGender:
+          $ref: "#/components/schemas/VocalGender"
+        model:
+          type: string
+          default: V4_5PLUS
+        styleWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        weirdnessConstraint:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        audioWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+
+    AddInstrumentalRequest:
+      type: object
+      required: [uploadUrl, title, negativeTags, tags, callBackUrl]
+      properties:
+        uploadUrl:
+          type: string
+          format: uri
+          description: URL of the vocal track to add an instrumental backing to.
+        title:
+          type: string
+        negativeTags:
+          type: string
+        tags:
+          type: string
+          description: Style tags for the generated instrumental.
+        callBackUrl:
+          type: string
+          format: uri
+        vocalGender:
+          $ref: "#/components/schemas/VocalGender"
+        model:
+          type: string
+          default: V4_5PLUS
+        styleWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        weirdnessConstraint:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        audioWeight:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+
+    GetTimestampedLyricsRequest:
+      type: object
+      required: [taskId, audioId]
+      properties:
+        taskId:
+          type: string
+        audioId:
+          type: string
+
+    GeneratePersonaRequest:
+      type: object
+      required: [taskId, audioId, name, description]
+      properties:
+        taskId:
+          type: string
+        audioId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        vocalStart:
+          type: number
+          minimum: 0
+          default: 0.0
+          description: Start offset (seconds) of the vocal sample.
+        vocalEnd:
+          type: number
+          minimum: 0
+          default: 30.0
+          description: End offset (seconds) of the vocal sample.
+        style:
+          type: string
+          nullable: true
+
+    GenerateLyricsRequest:
+      type: object
+      required: [prompt, callBackUrl]
+      properties:
+        prompt:
+          type: string
+          maxLength: 200
+          description: Theme or mood description for lyric generation.
+          example: "A melancholic song about rainy autumn evenings"
+        callBackUrl:
+          type: string
+          format: uri
+
+    SeparateVocalsRequest:
+      type: object
+      required: [taskId, audioId]
+      properties:
+        taskId:
+          type: string
+          description: Task ID of the completed generation job.
+        audioId:
+          type: string
+          description: Audio entry ID of the track to separate.
+        callBackUrl:
+          type: string
+          format: uri
+          nullable: true
+        type:
+          $ref: "#/components/schemas/SeparationType"
+
+    ConvertToWavRequest:
+      type: object
+      required: [taskId, audioId]
+      properties:
+        taskId:
+          type: string
+        audioId:
+          type: string
+        callBackUrl:
+          type: string
+          format: uri
+          nullable: true
+
+    CreateMusicVideoRequest:
+      type: object
+      required: [taskId, audioId]
+      properties:
+        taskId:
+          type: string
+        audioId:
+          type: string
+        callBackUrl:
+          type: string
+          format: uri
+          nullable: true
+        title:
+          type: string
+          maxLength: 100
+          nullable: true
+        author:
+          type: string
+          maxLength: 50
+          nullable: true
+        domainName:
+          type: string
+          maxLength: 50
+          nullable: true
+
+    GenerateCoverRequest:
+      type: object
+      required: [taskId, callBackUrl]
+      properties:
+        taskId:
+          type: string
+          description: Task ID of the generation job to generate cover art for.
+        callBackUrl:
+          type: string
+          format: uri
+        prompt:
+          type: string
+          maxLength: 300
+          nullable: true
+          description: >
+            Optional explicit image generation prompt.
+            When omitted, the style tags from the original generation task are used.
+        style:
+          type: string
+          maxLength: 100
+          nullable: true
+
+    GenerateSoundsRequest:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+          maxLength: 500
+          description: Description of the sound to generate.
+          example: "Ambient forest with birds and gentle wind"
+        model:
+          type: string
+          default: V5
+        soundLoop:
+          type: boolean
+          default: false
+          description: Generate a seamlessly loopable sound.
+        soundTempo:
+          type: integer
+          minimum: 1
+          maximum: 300
+          nullable: true
+          description: Target tempo in BPM (optional).
+        soundKey:
+          $ref: "#/components/schemas/SoundKey"
+        grabLyrics:
+          type: boolean
+          default: false
+        callBackUrl:
+          type: string
+          format: uri
+          nullable: true
+
+    BoostStyleRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          description: >
+            Short style description to expand, e.g. `"Pop, Mysterious"`.
+            Accessible as `style` internally.
+          example: "Dark Synthwave, Cinematic, Tense"
+        callBackUrl:
+          type: string
+          format: uri
+          nullable: true
+
+    # ── Specialised response payloads ─────────────────────────────────────────
+    TimestampedLyricsData:
+      type: object
+      properties:
+        alignedWords:
+          type: array
+          items:
+            type: object
+            properties:
+              word:
+                type: string
+              startS:
+                type: number
+              endS:
+                type: number
+              success:
+                type: boolean
+              palign:
+                type: number
+        waveformData:
+          type: array
+          items:
+            type: number
+        hootCer:
+          type: number
+        isStreamed:
+          type: boolean
+
+    PersonaData:
+      type: object
+      properties:
+        personaId:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+
+    LyricsEntryData:
+      type: object
+      properties:
+        text:
+          type: string
+          description: Generated lyrics text.
+        title:
+          type: string
+        status:
+          type: string
+          example: complete
+        errorMessage:
+          type: string
+
+    StyleBoostData:
+      type: object
+      properties:
+        original:
+          type: string
+        boosted:
+          type: string
+        status:
+          type: string
+          example: complete
+
+    VideoEntryData:
+      type: object
+      properties:
+        id:
+          type: string
+        videoUrl:
+          type: string
+        streamVideoUrl:
+          type: string
+        status:
+          type: string
+          example: complete
+        errorMessage:
+          type: string
+
+    CoverImageEntryData:
+      type: object
+      properties:
+        id:
+          type: string
+        imageUrl:
+          type: string
+        status:
+          type: string
+          example: complete
+        errorMessage:
+          type: string
+
+  # ── Reusable responses ──────────────────────────────────────────────────────
+  responses:
+    TaskCreated:
+      description: Task accepted; poll `record-info` with the returned `taskId`.
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ApiResponse"
+              - type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TaskCreatedData"
+          example:
+            code: 200
+            msg: success
+            data:
+              taskId: "a3f1b24c8e0d4f7a9b2c1d0e5f6a7b8c"
+
+    TaskDetail:
+      description: Current task status and output (if complete).
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: "#/components/schemas/ApiResponse"
+              - type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TaskDetailData"
+
+    BadRequest:
+      description: Invalid request parameters.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: 400
+            msg: "customMode=true requires: style, title"
+            data: null
+
+    Unauthorized:
+      description: Missing or invalid API key.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: 401
+            msg: "Invalid API key."
+            data: null
+
+    NotFound:
+      description: Task or resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: 404
+            msg: "Task not found"
+            data: null
+
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            code: 500
+            msg: "Internal Server Error"
+            data: null
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global security (applied to all operations; override per-operation to remove)
+# ─────────────────────────────────────────────────────────────────────────────
+security:
+  - BearerAuth: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tags
+# ─────────────────────────────────────────────────────────────────────────────
+tags:
+  - name: Music Generation
+    description: |
+      Core music synthesis: text-to-music, cover, extend, mashup, vocals/instrumental.
+      All endpoints are async – poll `GET /api/v1/generate/record-info`.
+  - name: Lyrics
+    description: AI lyric generation from a text prompt.
+  - name: Vocal Removal
+    description: Separate vocals or split into stems from a generated track.
+  - name: WAV
+    description: Convert a previously generated audio file to WAV format.
+  - name: Video
+    description: Render a waveform music-video MP4 from a generated track.
+  - name: Cover Art
+    description: Generate album cover artwork for a completed generation task.
+  - name: Style
+    description: Boost/expand a short style description using the LLM.
+  - name: Health
+    description: Service liveness probe.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Health ──────────────────────────────────────────────────────────────────
+  /health:
+    get:
+      summary: Health check
+      operationId: health_check
+      tags: [Health]
+      security: []
+      responses:
+        "200":
+          description: Service is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  # ── Generate ────────────────────────────────────────────────────────────────
+  /api/v1/generate:
+    post:
+      summary: Generate music
+      operationId: generate_music
+      tags: [Music Generation]
+      description: |
+        Generate one or more music tracks from a text description.
+
+        **Sync mode** (custom): supply `style` + `prompt` (lyrics), set `thinking=false` internally.
+
+        **AI mode**: supply only `prompt`, let the 5Hz LM write lyrics and style.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateMusicRequest"
+            examples:
+              ai_mode:
+                summary: AI-driven (no customMode)
+                value:
+                  customMode: false
+                  instrumental: false
+                  model: V4_5PLUS
+                  prompt: "An uplifting pop song about finding hope in difficult times"
+                  callBackUrl: "https://example.com/webhook"
+              custom_mode:
+                summary: Custom style + lyrics
+                value:
+                  customMode: true
+                  instrumental: false
+                  model: V4_5PLUS
+                  style: "Pop, Uplifting, Piano, Female Vocal"
+                  title: "Light Ahead"
+                  prompt: "[Verse]\nWalking through the storm\nI see a light ahead\n[Chorus]\nHope is all I need"
+                  callBackUrl: "https://example.com/webhook"
+              instrumental:
+                summary: Instrumental track
+                value:
+                  customMode: true
+                  instrumental: true
+                  model: V5
+                  style: "Cinematic, Orchestral, Epic"
+                  title: "Battle Theme"
+                  callBackUrl: "https://example.com/webhook"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/generate/record-info:
+    get:
+      summary: Poll generation task
+      operationId: get_music_generation_details
+      tags: [Music Generation]
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Task ID returned by any `/generate` POST endpoint.
+          example: a3f1b24c8e0d4f7a9b2c1d0e5f6a7b8c
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/generate/extend:
+    post:
+      summary: Extend an existing track
+      operationId: extend_music
+      tags: [Music Generation]
+      description: |
+        Continue a previously generated track from a given time offset.
+        Uses ACE-Step `repaint` task internally.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtendMusicRequest"
+            example:
+              defaultParamFlag: true
+              audioId: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9"
+              model: V4_5PLUS
+              style: "Pop, Uplifting"
+              title: "Light Ahead (Extended)"
+              prompt: "[Bridge]\nStill moving forward\nNever looking back"
+              continueAt: 28.0
+              callBackUrl: "https://example.com/webhook"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/generate/upload-cover:
+    post:
+      summary: Cover song with uploaded audio as reference
+      operationId: upload_cover
+      tags: [Music Generation]
+      description: |
+        Generates a new track strongly influenced by the style of the
+        uploaded reference audio. Uses ACE-Step `cover` task.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadCoverRequest"
+            example:
+              uploadUrl: "https://cdn.example.com/reference.mp3"
+              customMode: true
+              instrumental: false
+              model: V4_5PLUS
+              style: "Jazz, Smooth, Trumpet"
+              title: "Jazz Cover"
+              callBackUrl: "https://example.com/webhook"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/generate/upload-extend:
+    post:
+      summary: Extend an uploaded audio file
+      operationId: upload_extend
+      tags: [Music Generation]
+      description: Upload an MP3/FLAC and extend it from a given time offset.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadExtendRequest"
+            example:
+              uploadUrl: "https://cdn.example.com/my_song.mp3"
+              defaultParamFlag: false
+              model: V4_5PLUS
+              callBackUrl: "https://example.com/webhook"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/generate/mashup:
+    post:
+      summary: Mashup two audio files
+      operationId: generate_mashup
+      tags: [Music Generation]
+      description: Blend exactly two uploaded audio files into a single track.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateMashupRequest"
+            example:
+              uploadUrlList:
+                - "https://cdn.example.com/track_a.mp3"
+                - "https://cdn.example.com/track_b.mp3"
+              customMode: false
+              model: V4_5PLUS
+              prompt: "A blend of electronic and classical"
+              callBackUrl: "https://example.com/webhook"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/generate/add-vocals:
+    post:
+      summary: Add AI vocals to an instrumental
+      operationId: add_vocals
+      tags: [Music Generation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddVocalsRequest"
+            example:
+              prompt: "[Verse]\nSunrise over the mountains\nA new day begins"
+              title: "Mountain Dawn"
+              negativeTags: "Harsh, Metal"
+              style: "Folk, Acoustic, Gentle"
+              uploadUrl: "https://cdn.example.com/instrumental.mp3"
+              callBackUrl: "https://example.com/webhook"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/generate/add-instrumental:
+    post:
+      summary: Add instrumental backing to a vocal stem
+      operationId: add_instrumental
+      tags: [Music Generation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddInstrumentalRequest"
+            example:
+              uploadUrl: "https://cdn.example.com/vocal.mp3"
+              title: "Backed Vocal"
+              negativeTags: "Noise, Heavy"
+              tags: "R&B, Smooth, Strings"
+              callBackUrl: "https://example.com/webhook"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/generate/sounds:
+    post:
+      summary: Generate ambient sounds / SFX
+      operationId: generate_sounds
+      tags: [Music Generation]
+      description: Generate loopable ambient sounds or short SFX clips.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateSoundsRequest"
+            example:
+              prompt: "Crackling fireplace with distant rain"
+              soundLoop: true
+              soundKey: Any
+              callBackUrl: "https://example.com/webhook"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/generate/get-timestamped-lyrics:
+    post:
+      summary: Get word-level timestamped lyrics
+      operationId: get_timestamped_lyrics
+      tags: [Music Generation]
+      description: |
+        Returns word-aligned timestamps for a completed track.
+        Timestamps are best-effort (currently 0.0 for all words unless
+        an external aligner is configured).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GetTimestampedLyricsRequest"
+            example:
+              taskId: "a3f1b24c8e0d4f7a9b2c1d0e5f6a7b8c"
+              audioId: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9"
+      responses:
+        "200":
+          description: Timestamped word alignment.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/TimestampedLyricsData"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/generate/generate-persona:
+    post:
+      summary: Create a vocal persona from a track
+      operationId: generate_persona
+      tags: [Music Generation]
+      description: |
+        Creates a synthetic persona identifier derived from the specified
+        audio segment. The returned `personaId` can be passed back in
+        subsequent `/generate` requests.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeneratePersonaRequest"
+            example:
+              taskId: "a3f1b24c8e0d4f7a9b2c1d0e5f6a7b8c"
+              audioId: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9"
+              name: "Clara"
+              description: "Soft, breathy female pop voice"
+              vocalStart: 4.0
+              vocalEnd: 20.0
+      responses:
+        "200":
+          description: Persona created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PersonaData"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/generate/credit:
+    get:
+      summary: Remaining credits
+      operationId: get_remaining_credits
+      tags: [Music Generation]
+      description: Returns the simulated credit balance (configured via `SIMULATED_CREDITS`).
+      responses:
+        "200":
+          description: Credit balance.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        type: integer
+                        example: 9999
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Lyrics ──────────────────────────────────────────────────────────────────
+  /api/v1/lyrics:
+    post:
+      summary: Generate lyrics
+      operationId: generate_lyrics
+      tags: [Lyrics]
+      description: |
+        Uses the ACE-Step 5Hz LM to generate lyrics from a theme / mood prompt.
+        The LLM runs `infer_type="dit"` (metadata-only, no audio codes)
+        so this is significantly faster than full music generation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateLyricsRequest"
+            example:
+              prompt: "A bittersweet farewell to summer"
+              callBackUrl: "https://example.com/webhook"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/lyrics/record-info:
+    get:
+      summary: Poll lyrics task
+      operationId: get_lyrics_details
+      tags: [Lyrics]
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Lyrics task status.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/TaskDetailData"
+                          - type: object
+                            properties:
+                              response:
+                                type: object
+                                properties:
+                                  taskId:
+                                    type: string
+                                  data:
+                                    type: array
+                                    items:
+                                      $ref: "#/components/schemas/LyricsEntryData"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── Vocal Removal ───────────────────────────────────────────────────────────
+  /api/v1/vocal-removal/generate:
+    post:
+      summary: Separate vocals / split stems
+      operationId: separate_vocals
+      tags: [Vocal Removal]
+      description: |
+        Runs ACE-Step `extract` task on a previously generated track.
+        The `audioId` must reference a track from a completed `GENERATE` task.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SeparateVocalsRequest"
+            example:
+              taskId: "a3f1b24c8e0d4f7a9b2c1d0e5f6a7b8c"
+              audioId: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9"
+              type: separate_vocal
+              callBackUrl: "https://example.com/webhook"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/vocal-removal/record-info:
+    get:
+      summary: Poll vocal removal task
+      operationId: get_vocal_removal_details
+      tags: [Vocal Removal]
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── WAV ─────────────────────────────────────────────────────────────────────
+  /api/v1/wav/generate:
+    post:
+      summary: Convert audio to WAV
+      operationId: convert_to_wav
+      tags: [WAV]
+      description: |
+        Converts a previously generated FLAC/MP3 to 16-bit PCM WAV using
+        soundfile (with pydub as fallback).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConvertToWavRequest"
+            example:
+              taskId: "a3f1b24c8e0d4f7a9b2c1d0e5f6a7b8c"
+              audioId: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/wav/record-info:
+    get:
+      summary: Poll WAV conversion task
+      operationId: get_wav_details
+      tags: [WAV]
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── Video ───────────────────────────────────────────────────────────────────
+  /api/v1/mp4/generate:
+    post:
+      summary: Generate music video (MP4)
+      operationId: create_music_video
+      tags: [Video]
+      description: |
+        Renders a waveform-visualisation MP4 from a previously generated audio track.
+        Uses ffmpeg with `showwaves` filter + optional title overlay.
+        Falls back to audio-only MP4 if the waveform filter fails.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMusicVideoRequest"
+            example:
+              taskId: "a3f1b24c8e0d4f7a9b2c1d0e5f6a7b8c"
+              audioId: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9"
+              title: "Light Ahead"
+              author: "ACE-Step"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/mp4/record-info:
+    get:
+      summary: Poll MP4 generation task
+      operationId: get_mp4_details
+      tags: [Video]
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── Cover Art ───────────────────────────────────────────────────────────────
+  /api/v1/suno/cover/generate:
+    post:
+      summary: Generate album cover art
+      operationId: generate_cover
+      tags: [Cover Art]
+      description: |
+        Generates a cover image for a completed generation task.
+        If `prompt` is omitted, the style tags from the original task are used.
+
+        Image generation priority:
+        1. Stable Diffusion (if `diffusers` is installed and GPU available)
+        2. PIL gradient placeholder
+        3. 1×1 black transparent PNG stub
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GenerateCoverRequest"
+            example:
+              taskId: "a3f1b24c8e0d4f7a9b2c1d0e5f6a7b8c"
+              callBackUrl: "https://example.com/webhook"
+              prompt: "A neon city skyline at dusk, atmospheric, cinematic"
+              style: "Synthwave"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/suno/cover/record-info:
+    get:
+      summary: Poll cover art task
+      operationId: get_cover_details
+      tags: [Cover Art]
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Cover art task status.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiResponse"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/TaskDetailData"
+                          - type: object
+                            properties:
+                              response:
+                                type: object
+                                properties:
+                                  sunoData:
+                                    type: array
+                                    items:
+                                      $ref: "#/components/schemas/CoverImageEntryData"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── Style ───────────────────────────────────────────────────────────────────
+  /api/v1/style/generate:
+    post:
+      summary: Boost style description
+      operationId: boost_style
+      tags: [Style]
+      description: |
+        Expands a short style tag string into a richer music production brief
+        using the ACE-Step 5Hz LM (`infer_type="dit"`, CoT caption mode).
+        Returns the original and expanded versions in the task response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BoostStyleRequest"
+            example:
+              content: "Dark Synthwave, Cinematic, Tense"
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/midi/record-info:
+    get:
+      summary: Poll MIDI task (stub)
+      operationId: get_midi_details
+      tags: [Style]
+      description: |
+        MIDI conversion is not currently implemented.
+        Returns the stored task state for the given `taskId`.
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/TaskDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── Static audio files ───────────────────────────────────────────────────────
+  /audio/{filename}:
+    get:
+      summary: Download generated audio / video / image file
+      operationId: get_audio_file
+      tags: [Music Generation]
+      security: []
+      description: |
+        Static file server – returns the generated audio (FLAC/MP3/WAV),
+        video (MP4), or cover image (PNG) by filename.
+      parameters:
+        - name: filename
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "a3f1b24c_0.flac"
+      responses:
+        "200":
+          description: Binary file content.
+          content:
+            audio/flac:
+              schema:
+                type: string
+                format: binary
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: File not found.
